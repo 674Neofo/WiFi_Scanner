@@ -1,18 +1,5 @@
-#!/usr/bin/env python3
-"""
-Wifi_Scanner - a btop-style live WiFi network scanner for the terminal.
 
-Requires Python 3.11+.
 
-Backends (auto-detected):
-  Linux   : nmcli (NetworkManager), or `iw dev <iface> scan` (needs root)
-  Windows : netsh wlan (pip install windows-curses)
-
-Keys:
-  q / Esc  quit          s  cycle sort column    v  reverse sort
-  r        rescan now    +/-  scan interval      space  pause
-  Up/Down/PgUp/PgDn  scroll
-"""
 
 from __future__ import annotations
 
@@ -27,20 +14,17 @@ import sys
 import threading
 import time
 from collections import defaultdict
-from collections.abc import Callable
-from dataclasses import dataclass, field
-from enum import IntEnum, StrEnum
-from typing import Any, NamedTuple
+from dataclasses import dataclass
+from enum import IntEnum
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple
 
 APP = "Wifi_Scanner"
-VERSION = "2.0"
+VERSION = "2.1"
 
-
-class Band(StrEnum):
-    GHZ_2_4 = "2.4G"
-    GHZ_5 = "5G"
-    GHZ_6 = "6G"
-    UNKNOWN = "?"
+BAND_2_4 = "2.4G"
+BAND_5 = "5G"
+BAND_6 = "6G"
+BAND_UNKNOWN = "?"
 
 
 class Color(IntEnum):
@@ -52,7 +36,7 @@ class Color(IntEnum):
     ACTIVE = 6
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True)
 class Network:
     bssid: str
     essid: str
@@ -65,7 +49,7 @@ class Network:
     active: bool
 
     @property
-    def band(self) -> Band:
+    def band(self) -> str:
         return freq_to_band(self.freq)
 
     @property
@@ -79,7 +63,7 @@ class Network:
         return f"{'~' if self.estimated else ''}{self.rate} Mbps"
 
 
-Backend = Callable[[], list[Network]]
+Backend = Callable[[], List[Network]]
 
 
 class Selected(NamedTuple):
@@ -87,7 +71,7 @@ class Selected(NamedTuple):
     scan: Backend
 
 
-def run(cmd: list[str], timeout: int = 25) -> str:
+def run(cmd: List[str], timeout: int = 25) -> str:
     try:
         return subprocess.run(cmd, capture_output=True, text=True, timeout=timeout).stdout
     except (OSError, subprocess.SubprocessError):
@@ -95,29 +79,25 @@ def run(cmd: list[str], timeout: int = 25) -> str:
 
 
 def freq_to_channel(freq: int) -> int:
-    match freq:
-        case 2484:
-            return 14
-        case f if 2400 <= f < 2500:
-            return (f - 2407) // 5
-        case f if 5000 <= f < 5950:
-            return (f - 5000) // 5
-        case f if 5950 <= f <= 7125:
-            return (f - 5950) // 5
-        case _:
-            return 0
+    if freq == 2484:
+        return 14
+    if 2400 <= freq < 2500:
+        return (freq - 2407) // 5
+    if 5000 <= freq < 5950:
+        return (freq - 5000) // 5
+    if 5950 <= freq <= 7125:
+        return (freq - 5950) // 5
+    return 0
 
 
-def freq_to_band(freq: int) -> Band:
-    match freq:
-        case 0:
-            return Band.UNKNOWN
-        case f if f < 3000:
-            return Band.GHZ_2_4
-        case f if f < 5950:
-            return Band.GHZ_5
-        case _:
-            return Band.GHZ_6
+def freq_to_band(freq: int) -> str:
+    if freq == 0:
+        return BAND_UNKNOWN
+    if freq < 3000:
+        return BAND_2_4
+    if freq < 5950:
+        return BAND_5
+    return BAND_6
 
 
 def channel_to_freq(channel: int) -> int:
@@ -144,9 +124,9 @@ def to_int(text: str) -> int:
     return int(float(found.group())) if found else 0
 
 
-def split_terse(line: str) -> list[str]:
-    parts: list[str] = []
-    current: list[str] = []
+def split_terse(line: str) -> List[str]:
+    parts: List[str] = []
+    current: List[str] = []
     escaped = False
     for ch in line:
         if escaped:
@@ -156,21 +136,21 @@ def split_terse(line: str) -> list[str]:
             escaped = True
         elif ch == ":":
             parts.append("".join(current))
-            current.clear()
+            current = []
         else:
             current.append(ch)
     parts.append("".join(current))
     return parts
 
 
-def scan_nmcli() -> list[Network]:
+def scan_nmcli() -> List[Network]:
     out = run(
         [
             "nmcli", "-t", "-f", "IN-USE,BSSID,SSID,CHAN,FREQ,RATE,SIGNAL,SECURITY",
             "dev", "wifi", "list", "--rescan", "yes",
         ]
     )
-    networks: list[Network] = []
+    networks: List[Network] = []
     for line in out.splitlines():
         parts = split_terse(line)
         if len(parts) < 8:
@@ -192,7 +172,7 @@ def scan_nmcli() -> list[Network]:
     return networks
 
 
-def wifi_interface() -> str | None:
+def wifi_interface() -> Optional[str]:
     found = re.search(r"Interface (\S+)", run(["iw", "dev"]))
     return found.group(1) if found else None
 
@@ -209,7 +189,7 @@ def iw_security(block: str) -> str:
     return "Open"
 
 
-def iw_rate(block: str) -> tuple[int, bool]:
+def iw_rate(block: str) -> Tuple[int, bool]:
     for marker, rate in (("HE capabilities", 600), ("VHT capabilities", 433), ("HT capabilities", 150)):
         if marker in block:
             return rate, True
@@ -221,12 +201,12 @@ def iw_rate(block: str) -> tuple[int, bool]:
     return (int(max(rates)) if rates else 0), False
 
 
-def scan_iw() -> list[Network]:
+def scan_iw() -> List[Network]:
     iface = wifi_interface()
     if not iface:
         return []
     out = run(["iw", "dev", iface, "scan"])
-    networks: list[Network] = []
+    networks: List[Network] = []
     for block in re.split(r"(?m)^BSS ", out)[1:]:
         freq = re.search(r"freq: (\d+)", block)
         signal = re.search(r"signal: (-?[\d.]+) dBm", block)
@@ -262,20 +242,22 @@ RADIO_SPEED = {
 }
 
 
-def scan_netsh() -> list[Network]:
+def scan_netsh() -> List[Network]:
     out = run(["netsh", "wlan", "show", "networks", "mode=bssid"])
-    rows: list[dict[str, Any]] = []
+    rows: List[Dict[str, Any]] = []
     ssid = auth = ""
-    current: dict[str, Any] | None = None
+    current: Optional[Dict[str, Any]] = None
     for raw in out.splitlines():
         line = raw.strip()
-        if m := re.match(r"SSID \d+ : (.*)", line):
+        m = re.match(r"SSID \d+ : (.*)", line)
+        if m:
             ssid, auth, current = m.group(1).strip(), "", None
             continue
         if line.startswith("Authentication"):
             auth = line.split(":", 1)[1].strip()
             continue
-        if m := re.match(r"BSSID \d+\s*: (.*)", line):
+        m = re.match(r"BSSID \d+\s*: (.*)", line)
+        if m:
             current = {
                 "bssid": m.group(1).strip(),
                 "ssid": ssid,
@@ -289,13 +271,12 @@ def scan_netsh() -> list[Network]:
         if current is None or ":" not in line:
             continue
         key, value = (part.strip() for part in line.split(":", 1))
-        match key:
-            case "Signal":
-                current["signal"] = to_int(value)
-            case "Radio type":
-                current["radio"] = value
-            case "Channel":
-                current["chan"] = to_int(value)
+        if key == "Signal":
+            current["signal"] = to_int(value)
+        elif key == "Radio type":
+            current["radio"] = value
+        elif key == "Channel":
+            current["chan"] = to_int(value)
     return [
         Network(
             bssid=row["bssid"].upper(),
@@ -312,7 +293,7 @@ def scan_netsh() -> list[Network]:
     ]
 
 
-def pick_backend() -> Selected | None:
+def pick_backend() -> Optional[Selected]:
     if platform.system() == "Windows":
         return Selected("netsh", scan_netsh)
     if shutil.which("nmcli"):
@@ -322,21 +303,19 @@ def pick_backend() -> Selected | None:
     return None
 
 
-@dataclass(slots=True)
 class Scanner(threading.Thread):
-    scan: Backend
-    interval: int
-    networks: list[Network] = field(default_factory=list)
-    previous: dict[str, int] = field(default_factory=dict)
-    paused: bool = False
-    scanning: bool = False
-    last: float = 0.0
-    running: bool = True
-    lock: threading.Lock = field(default_factory=threading.Lock)
-    kick: threading.Event = field(default_factory=threading.Event)
-
-    def __post_init__(self) -> None:
-        threading.Thread.__init__(self, daemon=True)
+    def __init__(self, scan: Backend, interval: int) -> None:
+        super().__init__(daemon=True)
+        self.scan = scan
+        self.interval = interval
+        self.networks: List[Network] = []
+        self.previous: Dict[str, int] = {}
+        self.paused = False
+        self.scanning = False
+        self.last = 0.0
+        self.running = True
+        self.lock = threading.Lock()
+        self.kick = threading.Event()
 
     def run(self) -> None:
         while self.running:
@@ -351,7 +330,7 @@ class Scanner(threading.Thread):
             self.kick.clear()
             self.kick.wait(self.interval)
 
-    def snapshot(self) -> tuple[list[Network], dict[str, int]]:
+    def snapshot(self) -> Tuple[List[Network], Dict[str, int]]:
         with self.lock:
             return list(self.networks), dict(self.previous)
 
@@ -360,7 +339,7 @@ class Scanner(threading.Thread):
         self.kick.set()
 
 
-SORT_KEYS: dict[str, Callable[[Network], Any]] = {
+SORT_KEYS: Dict[str, Callable[[Network], Any]] = {
     "signal": lambda n: n.signal,
     "essid": lambda n: n.essid.lower(),
     "channel": lambda n: n.channel,
@@ -371,7 +350,7 @@ SORT_NAMES = list(SORT_KEYS)
 DEFAULT_REVERSE = {"signal", "speed"}
 
 
-@dataclass(slots=True)
+@dataclass
 class ViewState:
     sort_index: int = 0
     reverse: bool = True
@@ -382,7 +361,7 @@ class ViewState:
         return SORT_NAMES[self.sort_index]
 
 
-def put(win: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
+def put(win: Any, y: int, x: int, text: str, attr: int = 0) -> None:
     height, width = win.getmaxyx()
     if not 0 <= y < height or x >= width:
         return
@@ -395,10 +374,10 @@ def put(win: curses.window, y: int, x: int, text: str, attr: int = 0) -> None:
 
 def signal_color(pct: int) -> int:
     level = Color.GOOD if pct >= 70 else Color.FAIR if pct >= 40 else Color.BAD
-    return curses.color_pair(level)
+    return curses.color_pair(int(level))
 
 
-def draw_title(win: curses.window, sc: Scanner, backend: str, count: int) -> None:
+def draw_title(win: Any, sc: Scanner, backend: str, count: int) -> None:
     width = win.getmaxyx()[1]
     ago = f"{int(time.time() - sc.last)}s ago" if sc.last else "never"
     state = "SCANNING" if sc.scanning else "PAUSED" if sc.paused else "LIVE"
@@ -406,14 +385,14 @@ def draw_title(win: curses.window, sc: Scanner, backend: str, count: int) -> Non
         f" {APP} v{VERSION} "
         f" {backend} | {count} networks | every {sc.interval}s | last {ago} | {state} "
     )
-    put(win, 0, 0, text.ljust(width), curses.color_pair(Color.BAR) | curses.A_BOLD)
+    put(win, 0, 0, text.ljust(width), curses.color_pair(int(Color.BAR)) | curses.A_BOLD)
 
 
 def draw_table(
-    win: curses.window,
+    win: Any,
     sc: Scanner,
-    nets: list[Network],
-    prev: dict[str, int],
+    nets: List[Network],
+    prev: Dict[str, int],
     view: ViewState,
     table_h: int,
 ) -> None:
@@ -437,7 +416,7 @@ def draw_table(
             "SECURITY".ljust(c_sec),
         )
     )
-    put(win, 1, 0, header.ljust(width), curses.color_pair(Color.HEAD) | curses.A_BOLD)
+    put(win, 1, 0, header.ljust(width), curses.color_pair(int(Color.HEAD)) | curses.A_BOLD)
 
     if not nets:
         message = (
@@ -449,7 +428,7 @@ def draw_table(
 
     for i, net in enumerate(nets[view.scroll : view.scroll + table_h]):
         y = 2 + i
-        attr = curses.color_pair(Color.ACTIVE) | curses.A_BOLD if net.active else 0
+        attr = curses.color_pair(int(Color.ACTIVE)) | curses.A_BOLD if net.active else 0
         x = 0
         put(win, y, x, ("●" if net.active else " ") + net.essid[:c_essid].ljust(c_essid), attr)
         x += c_essid + 2
@@ -468,14 +447,14 @@ def draw_table(
         trend = " " if old is None or old == net.signal else "↑" if net.signal > old else "↓"
         put(win, y, x + 9, f"{net.dbm:>4}dBm{trend}", color)
         x += c_sig + 1
-        sec_attr = curses.color_pair(Color.BAD) if net.security == "Open" else 0
+        sec_attr = curses.color_pair(int(Color.BAD)) if net.security == "Open" else 0
         put(win, y, x, net.security[:c_sec].ljust(c_sec), sec_attr)
 
 
-def draw_usage(win: curses.window, nets: list[Network], top: int, rows: int) -> None:
+def draw_usage(win: Any, nets: List[Network], top: int, rows: int) -> None:
     width = win.getmaxyx()[1]
-    put(win, top, 0, " Channel usage ".ljust(width), curses.color_pair(Color.HEAD) | curses.A_BOLD)
-    usage: defaultdict[tuple[str, int], list[int]] = defaultdict(list)
+    put(win, top, 0, " Channel usage ".ljust(width), curses.color_pair(int(Color.HEAD)) | curses.A_BOLD)
+    usage: Dict[Tuple[str, int], List[int]] = defaultdict(list)
     for net in nets:
         usage[(net.band, net.channel)].append(net.signal)
     cell_w = 28
@@ -489,7 +468,7 @@ def draw_usage(win: curses.window, nets: list[Network], top: int, rows: int) -> 
         put(win, y, x + 21, f" {count}")
 
 
-def draw(win: curses.window, sc: Scanner, backend: str, view: ViewState) -> None:
+def draw(win: Any, sc: Scanner, backend: str, view: ViewState) -> None:
     win.erase()
     height, width = win.getmaxyx()
     nets, prev = sc.snapshot()
@@ -505,48 +484,47 @@ def draw(win: curses.window, sc: Scanner, backend: str, view: ViewState) -> None
         draw_usage(win, nets, height - 1 - panel_h, panel_h)
 
     footer = " q quit  s sort  v reverse  r rescan  +/- interval  space pause  ↑↓ scroll "
-    put(win, height - 1, 0, footer.ljust(width), curses.color_pair(Color.BAR))
+    put(win, height - 1, 0, footer.ljust(width), curses.color_pair(int(Color.BAR)))
     win.refresh()
 
 
 def handle_key(key: int, sc: Scanner, view: ViewState, height: int) -> bool:
-    match key:
-        case 27 | 113 | 81:
-            return False
-        case 115 | 83:
-            view.sort_index = (view.sort_index + 1) % len(SORT_NAMES)
-            view.reverse = view.sort_name in DEFAULT_REVERSE
-        case 118 | 86:
-            view.reverse = not view.reverse
-        case 114 | 82:
-            sc.kick.set()
-        case 32:
-            sc.paused = not sc.paused
-        case 43 | 61:
-            sc.interval = min(120, sc.interval + 1)
-        case 45 | 95:
-            sc.interval = max(1, sc.interval - 1)
-        case curses.KEY_UP:
-            view.scroll -= 1
-        case curses.KEY_DOWN:
-            view.scroll += 1
-        case curses.KEY_PPAGE:
-            view.scroll -= height // 2
-        case curses.KEY_NPAGE:
-            view.scroll += height // 2
+    if key in (27, ord("q"), ord("Q")):
+        return False
+    if key in (ord("s"), ord("S")):
+        view.sort_index = (view.sort_index + 1) % len(SORT_NAMES)
+        view.reverse = view.sort_name in DEFAULT_REVERSE
+    elif key in (ord("v"), ord("V")):
+        view.reverse = not view.reverse
+    elif key in (ord("r"), ord("R")):
+        sc.kick.set()
+    elif key == ord(" "):
+        sc.paused = not sc.paused
+    elif key in (ord("+"), ord("=")):
+        sc.interval = min(120, sc.interval + 1)
+    elif key in (ord("-"), ord("_")):
+        sc.interval = max(1, sc.interval - 1)
+    elif key == curses.KEY_UP:
+        view.scroll -= 1
+    elif key == curses.KEY_DOWN:
+        view.scroll += 1
+    elif key == curses.KEY_PPAGE:
+        view.scroll -= height // 2
+    elif key == curses.KEY_NPAGE:
+        view.scroll += height // 2
     return True
 
 
-def tui(stdscr: curses.window, backend: Selected, interval: int) -> None:
+def tui(stdscr: Any, backend: Selected, interval: int) -> None:
     curses.curs_set(0)
     curses.start_color()
     curses.use_default_colors()
-    curses.init_pair(Color.GOOD, curses.COLOR_GREEN, -1)
-    curses.init_pair(Color.FAIR, curses.COLOR_YELLOW, -1)
-    curses.init_pair(Color.BAD, curses.COLOR_RED, -1)
-    curses.init_pair(Color.BAR, curses.COLOR_BLACK, curses.COLOR_CYAN)
-    curses.init_pair(Color.HEAD, curses.COLOR_CYAN, -1)
-    curses.init_pair(Color.ACTIVE, curses.COLOR_MAGENTA, -1)
+    curses.init_pair(int(Color.GOOD), curses.COLOR_GREEN, -1)
+    curses.init_pair(int(Color.FAIR), curses.COLOR_YELLOW, -1)
+    curses.init_pair(int(Color.BAD), curses.COLOR_RED, -1)
+    curses.init_pair(int(Color.BAR), curses.COLOR_BLACK, curses.COLOR_CYAN)
+    curses.init_pair(int(Color.HEAD), curses.COLOR_CYAN, -1)
+    curses.init_pair(int(Color.ACTIVE), curses.COLOR_MAGENTA, -1)
     stdscr.timeout(200)
 
     scanner = Scanner(backend.scan, interval)
